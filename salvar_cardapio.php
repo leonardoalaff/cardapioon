@@ -1,0 +1,883 @@
+<?php
+session_start();
+require 'db.php';
+
+if (!isset($_SESSION['usuario_id'])) {
+    header("Location: index.php");
+    exit;
+}
+
+$usuario_id = (int) $_SESSION['usuario_id'];
+
+function redirecionarPainel(): void
+{
+    header("Location: painel.php");
+    exit;
+}
+
+function flash(string $tipo, string $mensagem): void
+{
+    $_SESSION['flash_' . $tipo] = $mensagem;
+}
+
+function salvarUpload(array $arquivo, string $prefixo = 'img'): ?string
+{
+    if (empty($arquivo) || !isset($arquivo['error'])) {
+        return null;
+    }
+
+    if ($arquivo['error'] === UPLOAD_ERR_NO_FILE) {
+        return null;
+    }
+
+    if ($arquivo['error'] !== UPLOAD_ERR_OK) {
+        return null;
+    }
+
+    if (empty($arquivo['tmp_name']) || !is_uploaded_file($arquivo['tmp_name'])) {
+        return null;
+    }
+
+    $extensoesPermitidas = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+    $extensao = strtolower(pathinfo($arquivo['name'] ?? '', PATHINFO_EXTENSION));
+
+    if (!in_array($extensao, $extensoesPermitidas, true)) {
+        return null;
+    }
+
+    $diretorio = __DIR__ . '/uploads';
+
+    if (!is_dir($diretorio)) {
+        if (!mkdir($diretorio, 0777, true) && !is_dir($diretorio)) {
+            return null;
+        }
+    }
+
+    $nomeArquivo = $prefixo . '_' . uniqid('', true) . '.' . $extensao;
+    $destino = $diretorio . '/' . $nomeArquivo;
+
+    if (!move_uploaded_file($arquivo['tmp_name'], $destino)) {
+        return null;
+    }
+
+    return 'uploads/' . $nomeArquivo;
+}
+
+function removerArquivoLocal(?string $caminho): void
+{
+    if (!$caminho) {
+        return;
+    }
+
+    if (strpos($caminho, 'uploads/') !== 0) {
+        return;
+    }
+
+    $arquivo = __DIR__ . '/' . $caminho;
+
+    if (is_file($arquivo)) {
+        @unlink($arquivo);
+    }
+}
+
+
+function salvarBase64ComoImagem(string $base64, string $prefixo = 'img_ia'): ?string
+{
+    $base64 = trim($base64);
+    if ($base64 === '') {
+        return null;
+    }
+
+    if (strpos($base64, ',') !== false) {
+        $partes = explode(',', $base64, 2);
+        $base64 = $partes[1] ?? $base64;
+    }
+
+    $binario = base64_decode($base64, true);
+    if ($binario === false || $binario === '') {
+        return null;
+    }
+
+    $diretorio = __DIR__ . '/uploads';
+    if (!is_dir($diretorio)) {
+        if (!mkdir($diretorio, 0777, true) && !is_dir($diretorio)) {
+            return null;
+        }
+    }
+
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    $mime = $finfo->buffer($binario) ?: 'image/png';
+    $mapa = [
+        'image/png' => 'png',
+        'image/jpeg' => 'jpg',
+        'image/webp' => 'webp',
+        'image/gif' => 'gif',
+    ];
+    $extensao = $mapa[$mime] ?? 'png';
+
+    $nomeArquivo = $prefixo . '_' . uniqid('', true) . '.' . $extensao;
+    $destino = $diretorio . '/' . $nomeArquivo;
+
+    if (file_put_contents($destino, $binario) === false) {
+        return null;
+    }
+
+    return 'uploads/' . $nomeArquivo;
+}
+
+function montarPromptImagemProduto(string $nomeNegocio, string $nomeItem, string $descricaoItem, string $categoriaItem, string $promptExtra = ''): string
+{
+    $partes = [];
+    $partes[] = 'Crie uma foto publicitária de comida para cardápio digital, muito realista, iluminação profissional, composição central, alta qualidade e sem texto.';
+    $partes[] = 'Produto: ' . $nomeItem . '.';
+
+    if ($descricaoItem !== '') {
+        $partes[] = 'Descrição do produto: ' . $descricaoItem . '.';
+    }
+
+    if ($categoriaItem !== '') {
+        $partes[] = 'Categoria: ' . $categoriaItem . '.';
+    }
+
+    if ($nomeNegocio !== '') {
+        $partes[] = 'Marca/restaurante: ' . $nomeNegocio . '.';
+    }
+
+    $partes[] = 'Mostrar apenas o alimento ou bebida, em destaque, com aparência apetitosa, cenário limpo e adequado para ecommerce e delivery.';
+    $partes[] = 'Evite letras, logotipos, marcas d\'água, pessoas, mãos, pratos poluídos, colagens e elementos cortados.';
+
+    if ($promptExtra !== '') {
+        $partes[] = 'Instruções extras do usuário: ' . $promptExtra . '.';
+    }
+
+    return implode(' ', $partes);
+}
+
+function chamarOpenAIChatJson(string $developerPrompt, string $userPrompt): array
+{
+    require_once __DIR__ . '/config_openai.php';
+
+    if (!defined('OPENAI_API_KEY') || OPENAI_API_KEY === '' || OPENAI_API_KEY === 'chaveapileonardo') {
+        return ['ok' => false, 'erro' => 'Configure sua chave da OpenAI em config_openai.php para usar o layout inteligente.'];
+    }
+
+    if (!function_exists('curl_init')) {
+        return ['ok' => false, 'erro' => 'O cURL não está habilitado no servidor.'];
+    }
+
+    $payload = [
+        'model' => defined('OPENAI_MODEL') ? OPENAI_MODEL : 'gpt-4.1-mini',
+        'messages' => [
+            ['role' => 'developer', 'content' => $developerPrompt],
+            ['role' => 'user', 'content' => $userPrompt],
+        ],
+        'temperature' => 0.8,
+        'response_format' => [
+            'type' => 'json_schema',
+            'json_schema' => [
+                'name' => 'layout_inteligente',
+                'strict' => true,
+                'schema' => [
+                    'type' => 'object',
+                    'additionalProperties' => false,
+                    'properties' => [
+                        'tema' => ['type' => 'string'],
+                        'cor_principal' => ['type' => 'string'],
+                        'cor_preco' => ['type' => 'string'],
+                        'cor_botao_adicionar' => ['type' => 'string'],
+                        'cor_botao_ver_carrinho' => ['type' => 'string'],
+                        'cor_botao_finalizar_pedido' => ['type' => 'string'],
+                        'cor_titulo_cabecalho' => ['type' => 'string'],
+                        'cor_descricao_cabecalho' => ['type' => 'string'],
+                        'cor_fundo_cardapio' => ['type' => 'string'],
+                        'prompt_imagem_fundo' => ['type' => 'string'],
+                    ],
+                    'required' => [
+                        'tema',
+                        'cor_principal',
+                        'cor_preco',
+                        'cor_botao_adicionar',
+                        'cor_botao_ver_carrinho',
+                        'cor_botao_finalizar_pedido',
+                        'cor_titulo_cabecalho',
+                        'cor_descricao_cabecalho',
+                        'cor_fundo_cardapio',
+                        'prompt_imagem_fundo'
+                    ]
+                ]
+            ]
+        ]
+    ];
+
+    $ch = curl_init('https://api.openai.com/v1/chat/completions');
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . OPENAI_API_KEY,
+        ],
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 180,
+    ]);
+
+    $resposta = curl_exec($ch);
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $erroCurl = curl_error($ch);
+    curl_close($ch);
+
+    if ($resposta === false || $erroCurl) {
+        return ['ok' => false, 'erro' => 'Falha ao conectar com a OpenAI: ' . $erroCurl];
+    }
+
+    $json = json_decode($resposta, true);
+
+    if ($httpCode >= 400) {
+        $mensagem = $json['error']['message'] ?? ('Erro HTTP ' . $httpCode . ' ao gerar layout inteligente.');
+        return ['ok' => false, 'erro' => $mensagem];
+    }
+
+    $conteudo = $json['choices'][0]['message']['content'] ?? '';
+    if (is_array($conteudo)) {
+        $partesTexto = [];
+        foreach ($conteudo as $parte) {
+            if (($parte['type'] ?? '') === 'text' && isset($parte['text'])) {
+                $partesTexto[] = $parte['text'];
+            }
+        }
+        $conteudo = implode("\n", $partesTexto);
+    }
+
+    $dados = json_decode((string) $conteudo, true);
+    if (!is_array($dados)) {
+        return ['ok' => false, 'erro' => 'A IA retornou um formato inválido para o layout inteligente.'];
+    }
+
+    return ['ok' => true, 'dados' => $dados];
+}
+
+function normalizarHex(string $valor, string $fallback): string
+{
+    $valor = strtoupper(trim($valor));
+    if (preg_match('/^#[0-9A-F]{6}$/', $valor)) {
+        return $valor;
+    }
+
+    return strtoupper($fallback);
+}
+
+function gerarImagemComIA(string $prompt, string $prefixo = 'img_ia', string $size = '1024x1024'): array
+{
+    require_once __DIR__ . '/config_openai.php';
+
+    if (!defined('OPENAI_API_KEY') || OPENAI_API_KEY === '' || OPENAI_API_KEY === 'chaveapileonardo') {
+        return ['ok' => false, 'erro' => 'Configure sua chave da OpenAI em config_openai.php para usar a geração de imagens.'];
+    }
+
+    if (!function_exists('curl_init')) {
+        return ['ok' => false, 'erro' => 'O cURL não está habilitado no servidor.'];
+    }
+
+    $payload = [
+        'model' => defined('OPENAI_IMAGE_MODEL') ? OPENAI_IMAGE_MODEL : 'gpt-image-1',
+        'prompt' => $prompt,
+        'size' => $size,
+    ];
+
+    $ch = curl_init('https://api.openai.com/v1/images/generations');
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'Authorization: Bearer ' . OPENAI_API_KEY,
+        ],
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE),
+        CURLOPT_TIMEOUT => 180,
+    ]);
+
+    $resposta = curl_exec($ch);
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $erroCurl = curl_error($ch);
+    curl_close($ch);
+
+    if ($resposta === false || $erroCurl) {
+        return ['ok' => false, 'erro' => 'Falha ao conectar com a OpenAI: ' . $erroCurl];
+    }
+
+    $json = json_decode($resposta, true);
+
+    if ($httpCode >= 400) {
+        $mensagem = $json['error']['message'] ?? ('Erro HTTP ' . $httpCode . ' ao gerar imagem.');
+        return ['ok' => false, 'erro' => $mensagem];
+    }
+
+    $imagemBase64 = $json['data'][0]['b64_json'] ?? null;
+    if (!$imagemBase64) {
+        return ['ok' => false, 'erro' => 'A API não retornou uma imagem em formato esperado.'];
+    }
+
+    $caminho = salvarBase64ComoImagem($imagemBase64, $prefixo);
+    if (!$caminho) {
+        return ['ok' => false, 'erro' => 'A imagem foi gerada, mas não foi possível salvá-la no servidor.'];
+    }
+
+    return ['ok' => true, 'caminho' => $caminho];
+}
+
+function gerarImagemProdutoComIA(string $prompt): array
+{
+    return gerarImagemComIA($prompt, 'item_ia', '1024x1024');
+}
+
+function gerarLayoutInteligente(string $nomeNegocio, string $descricaoLayout): array
+{
+    $developerPrompt = 'Você é um diretor de arte especialista em branding para restaurantes, delivery e cardápios digitais. Crie paletas visualmente coerentes, bonitas, modernas e legíveis. Sempre responda apenas com JSON válido no schema pedido. Todas as cores precisam estar em hexadecimal de 6 dígitos. O prompt da imagem deve descrever uma capa premium para o topo de um cardápio digital, sem textos, sem logotipos, sem letras e sem marcas d\'água.';
+
+    $userPrompt = 'Negócio: ' . $nomeNegocio . "\n"
+        . 'Descrição do restaurante/lanchonete: ' . $descricaoLayout . "\n"
+        . 'Crie uma identidade visual completa. A imagem de fundo deve combinar com o conceito descrito e funcionar bem como banner de cabeçalho de cardápio online.';
+
+    $resultado = chamarOpenAIChatJson($developerPrompt, $userPrompt);
+    if (!$resultado['ok']) {
+        return $resultado;
+    }
+
+    $dados = $resultado['dados'] ?? [];
+
+    $layout = [
+        'tema' => trim((string) ($dados['tema'] ?? 'Layout personalizado')),
+        'cor_principal' => normalizarHex((string) ($dados['cor_principal'] ?? ''), '#1677FF'),
+        'cor_preco' => normalizarHex((string) ($dados['cor_preco'] ?? ''), '#F97316'),
+        'cor_botao_adicionar' => normalizarHex((string) ($dados['cor_botao_adicionar'] ?? ''), '#EF4444'),
+        'cor_botao_ver_carrinho' => normalizarHex((string) ($dados['cor_botao_ver_carrinho'] ?? ''), '#EF4444'),
+        'cor_botao_finalizar_pedido' => normalizarHex((string) ($dados['cor_botao_finalizar_pedido'] ?? ''), '#EF4444'),
+        'cor_titulo_cabecalho' => normalizarHex((string) ($dados['cor_titulo_cabecalho'] ?? ''), '#2F2F2F'),
+        'cor_descricao_cabecalho' => normalizarHex((string) ($dados['cor_descricao_cabecalho'] ?? ''), '#4B5563'),
+        'cor_fundo_cardapio' => normalizarHex((string) ($dados['cor_fundo_cardapio'] ?? ''), '#F3F4F6'),
+        'prompt_imagem_fundo' => trim((string) ($dados['prompt_imagem_fundo'] ?? '')),
+    ];
+
+    if ($layout['prompt_imagem_fundo'] === '') {
+        $layout['prompt_imagem_fundo'] = 'Capa premium gastronômica para cardápio digital de ' . $nomeNegocio . ', inspirada em: ' . $descricaoLayout . '. Sem textos, sem logotipos, sem letras, iluminação cinematográfica, composição elegante e convidativa.';
+    }
+
+    return ['ok' => true, 'dados' => $layout];
+}
+
+function cardapioPertenceAoUsuario(PDO $db, int $cardapio_id, int $usuario_id): bool
+{
+    $stmt = $db->prepare("
+        SELECT id
+        FROM cardapios
+        WHERE id = ? AND usuario_id = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$cardapio_id, $usuario_id]);
+
+    return (bool) $stmt->fetch(PDO::FETCH_ASSOC);
+}
+
+function buscarCategoriaDoUsuario(PDO $db, int $categoria_id, int $cardapio_id, int $usuario_id): ?array
+{
+    $stmt = $db->prepare("
+        SELECT cat.id, cat.nome, cat.cardapio_id
+        FROM categorias cat
+        INNER JOIN cardapios c ON c.id = cat.cardapio_id
+        WHERE cat.id = ? AND cat.cardapio_id = ? AND c.usuario_id = ?
+        LIMIT 1
+    ");
+    $stmt->execute([$categoria_id, $cardapio_id, $usuario_id]);
+    $categoria = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    return $categoria ?: null;
+}
+
+function quantidadeItensNaCategoria(PDO $db, int $cardapio_id, string $nomeCategoria): int
+{
+    $stmt = $db->prepare("
+        SELECT COUNT(*)
+        FROM itens
+        WHERE cardapio_id = ? AND categoria = ?
+    ");
+    $stmt->execute([$cardapio_id, $nomeCategoria]);
+
+    return (int) $stmt->fetchColumn();
+}
+
+$acao = $_POST['acao'] ?? 'salvar_cardapio';
+
+try {
+    if ($acao === 'criar_categoria') {
+        $cardapio_id = (int) ($_POST['cardapio_id'] ?? 0);
+        $categoria_nome = trim($_POST['categoria_nome'] ?? '');
+
+        if ($cardapio_id <= 0) {
+            flash('erro', 'Cardápio inválido para criar categoria.');
+            redirecionarPainel();
+        }
+
+        if (!cardapioPertenceAoUsuario($db, $cardapio_id, $usuario_id)) {
+            flash('erro', 'Cardápio não encontrado.');
+            redirecionarPainel();
+        }
+
+        if ($categoria_nome === '') {
+            flash('erro', 'Digite o nome da categoria.');
+            redirecionarPainel();
+        }
+
+        $stmt = $db->prepare("
+            SELECT id
+            FROM categorias
+            WHERE cardapio_id = ? AND LOWER(nome) = LOWER(?)
+            LIMIT 1
+        ");
+        $stmt->execute([$cardapio_id, $categoria_nome]);
+
+        if ($stmt->fetch(PDO::FETCH_ASSOC)) {
+            flash('erro', 'Essa categoria já existe.');
+            redirecionarPainel();
+        }
+
+        $stmt = $db->prepare("
+            INSERT INTO categorias (cardapio_id, nome)
+            VALUES (?, ?)
+        ");
+        $stmt->execute([$cardapio_id, $categoria_nome]);
+
+        flash('sucesso', 'Categoria criada com sucesso.');
+        redirecionarPainel();
+    }
+
+
+    if ($acao === 'layout_inteligente') {
+        $cardapio_id = (int) ($_POST['cardapio_id'] ?? 0);
+        $descricao_layout = trim($_POST['descricao_layout_inteligente'] ?? '');
+
+        if ($cardapio_id <= 0) {
+            flash('erro', 'Cardápio inválido para aplicar o layout inteligente.');
+            redirecionarPainel();
+        }
+
+        if (!cardapioPertenceAoUsuario($db, $cardapio_id, $usuario_id)) {
+            flash('erro', 'Cardápio não encontrado.');
+            redirecionarPainel();
+        }
+
+        if ($descricao_layout === '') {
+            flash('erro', 'Descreva o estilo do seu restaurante para gerar o layout inteligente.');
+            redirecionarPainel();
+        }
+
+        $stmt = $db->prepare("
+            SELECT id, nome_negocio, imagem_fundo
+            FROM cardapios
+            WHERE id = ? AND usuario_id = ?
+            LIMIT 1
+        ");
+        $stmt->execute([$cardapio_id, $usuario_id]);
+        $cardapioAtual = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$cardapioAtual) {
+            flash('erro', 'Cardápio não encontrado.');
+            redirecionarPainel();
+        }
+
+        $resultadoLayout = gerarLayoutInteligente((string) ($cardapioAtual['nome_negocio'] ?? 'Meu Negócio'), $descricao_layout);
+        if (!$resultadoLayout['ok']) {
+            flash('erro', 'Não foi possível gerar o layout inteligente: ' . ($resultadoLayout['erro'] ?? 'erro desconhecido'));
+            redirecionarPainel();
+        }
+
+        $layout = $resultadoLayout['dados'] ?? [];
+
+        $resultadoImagem = gerarImagemComIA((string) ($layout['prompt_imagem_fundo'] ?? ''), 'fundo_ia', '1024x1024');
+        if (!$resultadoImagem['ok']) {
+            flash('erro', 'A paleta foi gerada, mas a imagem de fundo não pôde ser criada: ' . ($resultadoImagem['erro'] ?? 'erro desconhecido'));
+            redirecionarPainel();
+        }
+
+        $novoFundo = $resultadoImagem['caminho'] ?? null;
+        if (!$novoFundo) {
+            flash('erro', 'A imagem foi criada, mas não foi possível salvá-la no servidor.');
+            redirecionarPainel();
+        }
+
+        removerArquivoLocal($cardapioAtual['imagem_fundo'] ?? null);
+
+        $stmt = $db->prepare("
+            UPDATE cardapios
+            SET cor_principal = ?, cor_preco = ?, cor_botao_adicionar = ?, cor_botao_ver_carrinho = ?,
+                cor_botao_finalizar_pedido = ?, cor_titulo_cabecalho = ?, cor_descricao_cabecalho = ?,
+                cor_fundo_cardapio = ?, imagem_fundo = ?
+            WHERE id = ? AND usuario_id = ?
+        ");
+        $stmt->execute([
+            $layout['cor_principal'],
+            $layout['cor_preco'],
+            $layout['cor_botao_adicionar'],
+            $layout['cor_botao_ver_carrinho'],
+            $layout['cor_botao_finalizar_pedido'],
+            $layout['cor_titulo_cabecalho'],
+            $layout['cor_descricao_cabecalho'],
+            $layout['cor_fundo_cardapio'],
+            $novoFundo,
+            $cardapio_id,
+            $usuario_id
+        ]);
+
+        flash('sucesso', 'Layout inteligente aplicado com sucesso. A paleta e a imagem de fundo foram geradas por IA.');
+        redirecionarPainel();
+    }
+
+    if ($acao === 'editar_categoria') {
+        $cardapio_id = (int) ($_POST['cardapio_id'] ?? 0);
+        $categoria_id = (int) ($_POST['categoria_id'] ?? 0);
+        $categoria_nome = trim($_POST['categoria_nome'] ?? '');
+
+        if ($cardapio_id <= 0 || $categoria_id <= 0) {
+            flash('erro', 'Categoria inválida para edição.');
+            redirecionarPainel();
+        }
+
+        if ($categoria_nome === '') {
+            flash('erro', 'Digite o novo nome da categoria.');
+            redirecionarPainel();
+        }
+
+        $categoriaAtual = buscarCategoriaDoUsuario($db, $categoria_id, $cardapio_id, $usuario_id);
+
+        if (!$categoriaAtual) {
+            flash('erro', 'Categoria não encontrada.');
+            redirecionarPainel();
+        }
+
+        $stmt = $db->prepare("
+            SELECT id
+            FROM categorias
+            WHERE cardapio_id = ? AND LOWER(nome) = LOWER(?) AND id != ?
+            LIMIT 1
+        ");
+        $stmt->execute([$cardapio_id, $categoria_nome, $categoria_id]);
+
+        if ($stmt->fetch(PDO::FETCH_ASSOC)) {
+            flash('erro', 'Já existe outra categoria com esse nome.');
+            redirecionarPainel();
+        }
+
+        $stmt = $db->prepare("
+            UPDATE categorias
+            SET nome = ?
+            WHERE id = ? AND cardapio_id = ?
+        ");
+        $stmt->execute([$categoria_nome, $categoria_id, $cardapio_id]);
+
+        $stmt = $db->prepare("
+            UPDATE itens
+            SET categoria = ?
+            WHERE cardapio_id = ? AND categoria = ?
+        ");
+        $stmt->execute([$categoria_nome, $cardapio_id, $categoriaAtual['nome']]);
+
+        flash('sucesso', 'Categoria atualizada com sucesso.');
+        redirecionarPainel();
+    }
+
+    if ($acao === 'excluir_categoria') {
+        $cardapio_id = (int) ($_POST['cardapio_id'] ?? 0);
+        $categoria_id = (int) ($_POST['categoria_id'] ?? 0);
+
+        if ($cardapio_id <= 0 || $categoria_id <= 0) {
+            flash('erro', 'Categoria inválida para exclusão.');
+            redirecionarPainel();
+        }
+
+        $categoriaAtual = buscarCategoriaDoUsuario($db, $categoria_id, $cardapio_id, $usuario_id);
+
+        if (!$categoriaAtual) {
+            flash('erro', 'Categoria não encontrada.');
+            redirecionarPainel();
+        }
+
+        if (quantidadeItensNaCategoria($db, $cardapio_id, $categoriaAtual['nome']) > 0) {
+            flash('erro', 'Essa categoria está em uso e não pode ser excluída.');
+            redirecionarPainel();
+        }
+
+        $stmt = $db->prepare("
+            DELETE FROM categorias
+            WHERE id = ? AND cardapio_id = ?
+        ");
+        $stmt->execute([$categoria_id, $cardapio_id]);
+
+        flash('sucesso', 'Categoria excluída com sucesso.');
+        redirecionarPainel();
+    }
+
+    if ($acao === 'remover_fundo') {
+        $cardapio_id = (int) ($_POST['cardapio_id'] ?? 0);
+
+        $stmt = $db->prepare("
+            SELECT imagem_fundo
+            FROM cardapios
+            WHERE id = ? AND usuario_id = ?
+            LIMIT 1
+        ");
+        $stmt->execute([$cardapio_id, $usuario_id]);
+        $cardapio = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$cardapio) {
+            flash('erro', 'Cardápio não encontrado.');
+            redirecionarPainel();
+        }
+
+        removerArquivoLocal($cardapio['imagem_fundo'] ?? null);
+
+        $stmt = $db->prepare("
+            UPDATE cardapios
+            SET imagem_fundo = NULL
+            WHERE id = ? AND usuario_id = ?
+        ");
+        $stmt->execute([$cardapio_id, $usuario_id]);
+
+        flash('sucesso', 'Imagem de fundo removida com sucesso.');
+        redirecionarPainel();
+    }
+
+    if ($acao === 'atualizar_foto_item') {
+        $item_id = (int) ($_POST['item_id'] ?? 0);
+
+        $stmt = $db->prepare("
+            SELECT i.id, i.imagem
+            FROM itens i
+            INNER JOIN cardapios c ON c.id = i.cardapio_id
+            WHERE i.id = ? AND c.usuario_id = ?
+            LIMIT 1
+        ");
+        $stmt->execute([$item_id, $usuario_id]);
+        $itemAtual = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$itemAtual) {
+            flash('erro', 'Item não encontrado.');
+            redirecionarPainel();
+        }
+
+        if (!isset($_FILES['nova_item_imagem'])) {
+            flash('erro', 'Nenhum arquivo foi enviado.');
+            redirecionarPainel();
+        }
+
+        $novaImagem = salvarUpload($_FILES['nova_item_imagem'], 'item_cardapio');
+
+        if ($novaImagem === null) {
+            flash('erro', 'Não foi possível salvar a imagem. Use JPG, JPEG, PNG, WEBP ou GIF.');
+            redirecionarPainel();
+        }
+
+        removerArquivoLocal($itemAtual['imagem'] ?? null);
+
+        $stmt = $db->prepare("
+            UPDATE itens
+            SET imagem = ?
+            WHERE id = ?
+        ");
+        $ok = $stmt->execute([$novaImagem, $item_id]);
+
+        if (!$ok) {
+            flash('erro', 'Falha ao atualizar a foto do item.');
+            redirecionarPainel();
+        }
+
+        flash('sucesso', 'Foto do item salva com sucesso.');
+        redirecionarPainel();
+    }
+
+    if ($acao === 'remover_foto_item') {
+        $item_id = (int) ($_POST['item_id'] ?? 0);
+
+        $stmt = $db->prepare("
+            SELECT i.id, i.imagem
+            FROM itens i
+            INNER JOIN cardapios c ON c.id = i.cardapio_id
+            WHERE i.id = ? AND c.usuario_id = ?
+            LIMIT 1
+        ");
+        $stmt->execute([$item_id, $usuario_id]);
+        $itemAtual = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$itemAtual) {
+            flash('erro', 'Item não encontrado.');
+            redirecionarPainel();
+        }
+
+        removerArquivoLocal($itemAtual['imagem'] ?? null);
+
+        $stmt = $db->prepare("
+            UPDATE itens
+            SET imagem = NULL
+            WHERE id = ?
+        ");
+        $stmt->execute([$item_id]);
+
+        flash('sucesso', 'Foto removida com sucesso.');
+        redirecionarPainel();
+    }
+
+    $cardapio_id   = (int) ($_POST['cardapio_id'] ?? 0);
+    $nome_negocio  = trim($_POST['nome_negocio'] ?? '');
+    $descricao     = trim($_POST['descricao'] ?? '');
+    $cor_principal = trim($_POST['cor_principal'] ?? '#3b8edb');
+    $cor_preco = trim($_POST['cor_preco'] ?? '#f97316');
+    $cor_botao_adicionar = trim($_POST['cor_botao_adicionar'] ?? '#ef4444');
+    $cor_botao_ver_carrinho = trim($_POST['cor_botao_ver_carrinho'] ?? '#ef4444');
+    $cor_botao_finalizar_pedido = trim($_POST['cor_botao_finalizar_pedido'] ?? '#ef4444');
+    $cor_titulo_cabecalho = trim($_POST['cor_titulo_cabecalho'] ?? '#2f2f2f');
+    $cor_descricao_cabecalho = trim($_POST['cor_descricao_cabecalho'] ?? '#4b5563');
+    $cor_fundo_cardapio = trim($_POST['cor_fundo_cardapio'] ?? '#f3f4f6');
+    $endereco_estabelecimento = trim($_POST['endereco_estabelecimento'] ?? '');
+    $horario_abertura = trim($_POST['horario_abertura'] ?? '18:00');
+    $horario_fechamento = trim($_POST['horario_fechamento'] ?? '23:00');
+
+    $item_nome      = trim($_POST['item_nome'] ?? '');
+    $item_categoria = trim($_POST['item_categoria'] ?? '');
+    $item_descricao = trim($_POST['item_descricao'] ?? '');
+    $item_preco     = trim($_POST['item_preco'] ?? '');
+    $item_custo     = trim($_POST['item_custo'] ?? '');
+    $gerar_imagem_ia = isset($_POST['gerar_imagem_ia']) && (string) $_POST['gerar_imagem_ia'] === '1';
+    $item_prompt_imagem_ia = trim($_POST['item_prompt_imagem_ia'] ?? '');
+
+    if ($cardapio_id > 0) {
+        $stmt = $db->prepare("
+            SELECT id, imagem_fundo, cor_preco, cor_botao_adicionar, cor_botao_ver_carrinho, cor_botao_finalizar_pedido, cor_titulo_cabecalho, cor_descricao_cabecalho, cor_fundo_cardapio, endereco_estabelecimento, horario_abertura, horario_fechamento
+            FROM cardapios
+            WHERE id = ? AND usuario_id = ?
+            LIMIT 1
+        ");
+        $stmt->execute([$cardapio_id, $usuario_id]);
+        $cardapioAtual = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$cardapioAtual) {
+            flash('erro', 'Cardápio não encontrado.');
+            redirecionarPainel();
+        }
+
+        $novaImagemFundo = salvarUpload($_FILES['imagem_fundo'] ?? [], 'fundo_cardapio');
+
+        if ($novaImagemFundo !== null) {
+            removerArquivoLocal($cardapioAtual['imagem_fundo'] ?? null);
+
+            $stmt = $db->prepare("
+                UPDATE cardapios
+                SET nome_negocio = ?, descricao = ?, cor_principal = ?, imagem_fundo = ?, cor_preco = ?, cor_botao_adicionar = ?, cor_botao_ver_carrinho = ?, cor_botao_finalizar_pedido = ?, cor_titulo_cabecalho = ?, cor_descricao_cabecalho = ?, cor_fundo_cardapio = ?, endereco_estabelecimento = ?, horario_abertura = ?, horario_fechamento = ?
+                WHERE id = ? AND usuario_id = ?
+            ");
+            $stmt->execute([
+                $nome_negocio,
+                $descricao,
+                $cor_principal,
+                $novaImagemFundo,
+                $cor_preco,
+                $cor_botao_adicionar,
+                $cor_botao_ver_carrinho,
+                $cor_botao_finalizar_pedido,
+                $cor_titulo_cabecalho,
+                $cor_descricao_cabecalho,
+                $cor_fundo_cardapio,
+                $endereco_estabelecimento,
+                $horario_abertura,
+                $horario_fechamento,
+                $cardapio_id,
+                $usuario_id
+            ]);
+        } else {
+            $stmt = $db->prepare("
+                UPDATE cardapios
+                SET nome_negocio = ?, descricao = ?, cor_principal = ?, cor_preco = ?, cor_botao_adicionar = ?, cor_botao_ver_carrinho = ?, cor_botao_finalizar_pedido = ?, cor_titulo_cabecalho = ?, cor_descricao_cabecalho = ?, cor_fundo_cardapio = ?, endereco_estabelecimento = ?, horario_abertura = ?, horario_fechamento = ?
+                WHERE id = ? AND usuario_id = ?
+            ");
+            $stmt->execute([
+                $nome_negocio,
+                $descricao,
+                $cor_principal,
+                $cor_preco,
+                $cor_botao_adicionar,
+                $cor_botao_ver_carrinho,
+                $cor_botao_finalizar_pedido,
+                $cor_titulo_cabecalho,
+                $cor_descricao_cabecalho,
+                $cor_fundo_cardapio,
+                $endereco_estabelecimento,
+                $horario_abertura,
+                $horario_fechamento,
+                $cardapio_id,
+                $usuario_id
+            ]);
+        }
+
+        if ($item_nome !== '' && $item_preco !== '') {
+            if ($item_categoria === '') {
+                flash('erro', 'Selecione uma categoria para o novo item.');
+                redirecionarPainel();
+            }
+
+            $stmt = $db->prepare("
+                SELECT id
+                FROM categorias
+                WHERE cardapio_id = ? AND nome = ?
+                LIMIT 1
+            ");
+            $stmt->execute([$cardapio_id, $item_categoria]);
+
+            if (!$stmt->fetch(PDO::FETCH_ASSOC)) {
+                flash('erro', 'A categoria selecionada não é válida.');
+                redirecionarPainel();
+            }
+
+            $imagemItem = salvarUpload($_FILES['item_imagem'] ?? [], 'item_cardapio_novo');
+
+            if ($imagemItem === null && $gerar_imagem_ia) {
+                $promptImagem = montarPromptImagemProduto(
+                    $nome_negocio,
+                    $item_nome,
+                    $item_descricao,
+                    $item_categoria,
+                    $item_prompt_imagem_ia
+                );
+
+                $resultadoImagemIA = gerarImagemProdutoComIA($promptImagem);
+
+                if (!$resultadoImagemIA['ok']) {
+                    flash('erro', 'Não foi possível gerar a imagem com IA: ' . ($resultadoImagemIA['erro'] ?? 'erro desconhecido'));
+                    redirecionarPainel();
+                }
+
+                $imagemItem = $resultadoImagemIA['caminho'] ?? null;
+            }
+
+            $precoNumerico = (float) str_replace(',', '.', $item_preco);
+            $custoNumerico = $item_custo !== '' ? (float) str_replace(',', '.', $item_custo) : 0;
+
+            $stmt = $db->prepare("
+                INSERT INTO itens (cardapio_id, nome, descricao, preco, categoria, imagem, custo)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ");
+            $stmt->execute([
+                $cardapio_id,
+                $item_nome,
+                $item_descricao,
+                $precoNumerico,
+                $item_categoria,
+                $imagemItem,
+                $custoNumerico
+            ]);
+        }
+
+        flash('sucesso', 'Alterações salvas com sucesso.');
+    }
+
+    redirecionarPainel();
+} catch (Throwable $e) {
+    flash('erro', 'Erro ao salvar: ' . $e->getMessage());
+    redirecionarPainel();
+}
